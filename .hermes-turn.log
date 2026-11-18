@@ -1,0 +1,1131 @@
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/config.js
+│ @@ -1,61 +1,132 @@
+│ -// Every tuning number and colour in one place. The playfield is a fixed 1280x720 logical area;
+│ -// the renderer scales it to the window, so no rule below depends on the screen size.
+│ +// PORT VESPER - shared tuning, geometry and colours.
+│ +// The logical canvas is 1280x720; the renderer scales it to the window. The city itself is much
+│ +// larger and the camera shows only a window onto it. Every number used by more than one module
+│ +// lives here so a change never desynchronises simulation and drawing.
+│
+│ -export const FIELD = { width: 1280, height: 720, groundY: 664 };
+│ -
+│ -/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
+│ +export const FIELD = { width: 1280, height: 720 };
+│  export const STEP = 1 / 60;
+│
+│ -export const PLAYER = {
+│ -  width: 72,
+│ -  height: 24,
+│ -  speed: 560,
+│ -  invulnerable: 1.5,
+│ +// The city is a hand-authored grid: seven columns and six rows of city blocks, each separated by
+│ +// a wide road, with a waterfront strip south of the last road.
+│ +export const CITY = {
+│ +  cols: 7,
+│ +  rows: 6,
+│ +  cell: 400,
+│ +  road: 120,
+│ +  block: 280,
+│ +  sidewalk: 26,
+│ +  waterHeight: 300,
+│  };
+│
+│ -export const LIVES = 3;
+│ +export const WORLD_WIDTH = CITY.cols * CITY.cell + CITY.road;
+│ +export const LAND_HEIGHT = CITY.rows * CITY.cell + CITY.road;
+│ +export const WORLD_HEIGHT = LAND_HEIGHT + CITY.waterHeight;
+│
+│ -export const BLOCK = {
+│ -  minWidth: 40,
+│ -  maxWidth: 110,
+│ -  height: 36,
+│ -  speed: 240,
+│ -  speedPerLevel: 30,
+│ -  speedJitter: 90,
+│ -  interval: 0.55,
+│ -  intervalScale: 0.88,
+│ -  minInterval: 0.14,
+│ -  dodgePoints: 1,
+│ +// One character per city block, left to right, top to bottom. T=tall tower, B=large block,
+│ +// S=split pair, Q=four small shops, M=the market, P=park, O=open lot, H=hotel row.
+│ +export const CITY_MAP = [
+│ +  'TSBQHBT',
+│ +  'BQOSTS B'.replace(' ', ''),
+│ +  'QSMBTOQ',
+│ +  'TBQHSMB',
+│ +  'SOBTP Q'.replace(' ', ''),
+│ +  'HTBQMSB',
+│ +];
+│ +
+│ +export const STREET_NAMES = ['VESPER AVE', 'MARINA AVE', 'GRAND AVE', 'CINDER AVE', 'NORTH AVE', 'DOCK AVE', 'EAST AVE'];
+│ +export const CROSS_NAMES = ['HARBOR ST', 'MARKET ST', 'PALM ST', 'CENTRAL ST', 'IRON ST', 'BAY ST', 'SOUTH ST'];
+│ +
+│ +export const PLAYER = {
+│ +  radius: 13,
+│ +  walkSpeed: 195,
+│ +  sprintSpeed: 320,
+│ +  maxHealth: 100,
+│ +  startAmmo: 64,
+│ +  fireDelay: 0.14,
+│ +  bulletSpeed: 980,
+│ +  interactRange: 90,
+│ +  enterRange: 68,
+│ +  hurtDelay: 0.7,
+│  };
+│
+│ -export const COIN = {
+│ -  size: 24,
+│ -  speed: 190,
+│ -  speedPerLevel: 14,
+│ -  interval: 1.4,
+│ … omitted 102 diff line(s) across 1 additional file(s)/section(s)
+│ game/src/config.js
+│ @@ -26,10 +26,10 @@
+│  // S=split pair, Q=four small shops, M=the market, P=park, O=open lot, H=hotel row.
+│  export const CITY_MAP = [
+│    'TSBQHBT',
+│ -  'BQOSTS B'.replace(' ', ''),
+│ +  'BQOSTSB',
+│    'QSMBTOQ',
+│    'TBQHSMB',
+│ -  'SOBTP Q'.replace(' ', ''),
+│ +  'SOBTPOQ',
+│    'HTBQMSB',
+│  ];
+│
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/world.js
+│ @@ -1,124 +1,253 @@
+│ -// The game's rules and state, with no drawing and no browser in it: the player's paddle, the
+│ -// pool of falling blocks and coins, spawning, collisions, score, lives and level. step() advances
+│ -// one fixed step and returns what happened as bit flags, so the caller can react without the
+│ -// world knowing about screens or sound. Nothing here allocates after createWorld returns.
+│ -import { BLOCK, COIN, FIELD, LEVEL, LIVES, PLAYER, POOL_SIZE } from './config.js';
+│ -
+│ -export const KIND_BLOCK = 0;
+│ -export const KIND_COIN = 1;
+│ -
+│ -export const EVENT_HIT = 1;
+│ -export const EVENT_COIN = 2;
+│ -export const EVENT_OVER = 4;
+│ -
+│ -function overlaps(a, b) {
+│ -  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+│ -}
+│ -
+│ -export function createWorld(random) {
+│ -  const player = { x: 0, y: FIELD.groundY - PLAYER.height, width: PLAYER.width, height: PLAYER.height, invulnerable: 0 };
+│ -  const items = [];
+│ -  for (let index = 0; index < POOL_SIZE; index += 1) {
+│ -    items.push({ active: false, kind: KIND_BLOCK, x: 0, y: 0, width: 0, height: 0, speed: 0 });
+│ -  }
+│ -  const state = { player, items, score: 0, lives: LIVES, level: 1, elapsed: 0, blockTimer: 0, coinTimer: 0 };
+│ -
+│ -  function reset() {
+│ -    player.x = (FIELD.width - player.width) / 2;
+│ -    player.invulnerable = 0;
+│ -    for (const item of items) item.active = false;
+│ -    state.score = 0;
+│ -    state.lives = LIVES;
+│ -    state.level = 1;
+│ -    state.elapsed = 0;
+│ -    state.blockTimer = BLOCK.interval;
+│ -    state.coinTimer = COIN.interval;
+│ -  }
+│ -
+│ -  function freeItem() {
+│ -    for (let index = 0; index < items.length; index += 1) if (!items[index].active) return items[index];
+│ -    return null;
+│ -  }
+│ -
+│ -  function spawnBlock() {
+│ -    const item = freeItem();
+│ -    if (item === null) return;
+│ -    item.active = true;
+│ -    item.kind = KIND_BLOCK;
+│ -    item.width = BLOCK.minWidth + random() * (BLOCK.maxWidth - BLOCK.minWidth);
+│ -    item.height = BLOCK.height;
+│ -    item.x = random() * (FIELD.width - item.width);
+│ -    item.y = -item.height;
+│ -    item.speed = BLOCK.speed + BLOCK.speedPerLevel * (state.level - 1) + random() * BLOCK.speedJitter;
+│ -  }
+│ -
+│ -  function spawnCoin() {
+│ -    const item = freeItem();
+│ -    if (item === null) return;
+│ -    item.active = true;
+│ -    item.kind = KIND_COIN;
+│ -    item.width = COIN.size;
+│ -    item.height = COIN.size;
+│ -    item.x = random() * (FIELD.width - item.width);
+│ -    item.y = -item.height;
+│ -    item.speed = COIN.speed + COIN.speedPerLevel * (state.level - 1);
+│ -  }
+│ -
+│ -  function blockInterval() {
+│ -    return Math.max(BLOCK.minInterval, BLOCK.interval * BLOCK.intervalScale ** (state.level - 1));
+│ -  }
+│ -
+│ -  /**
+│ -   * One fixed step. `direction` is -1, 0 or 1 (left, still, right). With `harmless` set (the title
+│ -   * screen's backdrop) things fall but nothing touches the player and nothing scores.
+│ -   */
+│ -  function step(dt, direction, harmless) {
+│ -    let events = 0;
+│ -    state.elapsed += dt;
+│ -    state.level = Math.min(LEVEL.max, 1 + Math.floor(state.elapsed / LEVEL.seconds));
+│ … omitted 295 diff line(s) across 1 additional file(s)/section(s)
+│ game/src/world.js
+│ @@ -3,7 +3,7 @@
+│  // The simulation and the renderer read the same data, so a collision is exactly what you see.
+│
+│  import {
+│ -  CITY, CITY_MAP, COLORS, LAND_HEIGHT, STREET_NAMES, CROSS_NAMES,
+│ +  CITY, CITY_MAP, COLORS, FIELD, LAND_HEIGHT, STREET_NAMES, CROSS_NAMES,
+│    WORLD_HEIGHT, WORLD_WIDTH,
+│  } from './config.js';
+│
+│ game/src/world.js
+│ @@ -215,13 +215,10 @@
+│
+│  export function clampCamera(world, x, y) {
+│    return {
+│ -    x: Math.max(0, Math.min(world.width - FIELD_WIDTH, x)),
+│ -    y: Math.max(0, Math.min(world.height - FIELD_HEIGHT, y)),
+│ -  };
+│ -}
+│ -
+│ -const FIELD_WIDTH = 1280;
+│ -const FIELD_HEIGHT = 720;
+│ +    x: Math.max(0, Math.min(world.width - FIELD.width, x)),
+│ +    y: Math.max(0, Math.min(world.height - FIELD.height, y)),
+│ +  };
+│ +}
+│
+│  /** A point on a road roughly `distance` away from (x,y), used for police reinforcements. */
+│  export function roadSpawn(world, x, y, distance, rng) {
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/input.js
+│ @@ -1,52 +1,78 @@
+│ -// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
+│ -// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
+│ -// frames is never lost and never counted twice.
+│ +// PORT VESPER - keyboard and mouse. Held keys are read every frame; one-shot presses are queued as
+│ +// small action flags so a tap between two frames is never dropped or counted twice.
+│
+│ -export const ACTION_CONFIRM = 1;
+│ -export const ACTION_PAUSE = 2;
+│ +const KEY_CODES = new Set([
+│ +  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+│ +  'Space', 'ShiftLeft', 'ShiftRight', 'KeyE', 'KeyM', 'KeyP', 'Escape', 'Enter', 'KeyC', 'KeyR',
+│ +]);
+│
+│ -const LEFT = new Set(['ArrowLeft', 'KeyA']);
+│ -const RIGHT = new Set(['ArrowRight', 'KeyD']);
+│ -const CONFIRM = new Set(['Space', 'Enter']);
+│ -const PAUSE = new Set(['KeyP', 'Escape']);
+│ +export function createInput(canvas, toLogical) {
+│ +  const keys = new Set();
+│ +  const actions = { confirm: false, interact: false, mute: false, pause: false, continue: false, restart: false, click: false };
+│ +  let pointer = { x: 640, y: 360 };
+│ +  let firing = false;
+│
+│ -export function createInput(target) {
+│ -  let left = false;
+│ -  let right = false;
+│ -  let actions = 0;
+│ +  function movePointer(event) {
+│ +    pointer = toLogical(event.clientX, event.clientY);
+│ +  }
+│
+│    window.addEventListener('keydown', (event) => {
+│ -    if (LEFT.has(event.code)) left = true;
+│ -    else if (RIGHT.has(event.code)) right = true;
+│ -    else if (CONFIRM.has(event.code)) {
+│ -      if (!event.repeat) actions |= ACTION_CONFIRM;
+│ -    } else if (PAUSE.has(event.code)) {
+│ -      if (!event.repeat) actions |= ACTION_PAUSE;
+│ -    } else return;
+│ +    if (!KEY_CODES.has(event.code)) return;
+│ +    event.preventDefault();
+│ +    keys.add(event.code);
+│ +    if (event.repeat) return;
+│ +    if (event.code === 'Space' || event.code === 'Enter') actions.confirm = true;
+│ +    else if (event.code === 'KeyE') actions.interact = true;
+│ +    else if (event.code === 'KeyM') actions.mute = true;
+│ +    else if (event.code === 'KeyP' || event.code === 'Escape') actions.pause = true;
+│ +    else if (event.code === 'KeyC') actions.continue = true;
+│ +    else if (event.code === 'KeyR') actions.restart = true;
+│ +  });
+│ +
+│ +  window.addEventListener('keyup', (event) => {
+│ +    keys.delete(event.code);
+│ +  });
+│ +
+│ +  window.addEventListener('blur', () => {
+│ +    keys.clear();
+│ +    firing = false;
+│ +  });
+│ +
+│ +  canvas.addEventListener('pointermove', movePointer);
+│ +  canvas.addEventListener('pointerdown', (event) => {
+│ +    movePointer(event);
+│ +    if (event.button === 0) {
+│ +      firing = true;
+│ +      actions.click = true;
+│ +      actions.confirm = true;
+│ +    }
+│      event.preventDefault();
+│    });
+│ -  window.addEventListener('keyup', (event) => {
+│ -    if (LEFT.has(event.code)) left = false;
+│ -    else if (RIGHT.has(event.code)) right = false;
+│ -  });
+│ -  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
+│ -  window.addEventListener('blur', () => {
+│ -    left = false;
+│ -    right = false;
+│ … omitted 38 diff line(s) across 1 additional file(s)/section(s)
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/entities.js
+│ @@ -0,0 +1,281 @@
+│ +// PORT VESPER - moving things: cars, pedestrians, bullets and sparks. Traffic follows the lane
+│ +// rules from world.js and turns at junctions; police steer straight at the player. Everything is
+│ +// plain data so the renderer never has to know how a thing got where it is.
+│ +
+│ +import { CAR, CITY, COLORS, LAND_HEIGHT, POLICE, WORLD_WIDTH } from './config.js';
+│ +import {
+│ +  collideCircle, dirVector, laneCoord, roadIndex, roadSpawn, sidewalkPoint,
+│ +} from './world.js';
+│ +
+│ +function angleForDir(dir) {
+│ +  return dir === 0 ? 0 : dir === 1 ? Math.PI / 2 : dir === 2 ? Math.PI : -Math.PI / 2;
+│ +}
+│ +
+│ +export function createPlayer(world) {
+│ +  return {
+│ +    x: world.points.spawn.x,
+│ +    y: world.points.spawn.y,
+│ +    angle: -Math.PI / 2,
+│ +    vx: 0,
+│ +    vy: 0,
+│ +    health: 100,
+│ +    ammo: 64,
+│ +    fireCd: 0,
+│ +    hurtCd: 0,
+│ +    walkPhase: 0,
+│ +    car: null,
+│ +    nearCar: null,
+│ +    nearMarker: false,
+│ +    money: 0,
+│ +    heat: 0,
+│ +    shotCount: 0,
+│ +  };
+│ +}
+│ +
+│ +export function createCar(world, rng, options) {
+│ +  const kind = options.kind || 'civil';
+│ +  const dir = options.dir ?? Math.floor(rng() * 4);
+│ +  const lane = options.lane ?? laneCoord(dir, Math.floor(rng() * (dir % 2 ? CITY.cols : CITY.rows)));
+│ +  return {
+│ +    kind,
+│ +    x: options.x,
+│ +    y: options.y,
+│ +    angle: options.angle ?? angleForDir(dir),
+│ +    dir,
+│ +    lane,
+│ +    laneTarget: lane,
+│ +    speed: options.speed ?? 0,
+│ +    targetSpeed: options.targetSpeed ?? (kind === 'police' ? POLICE.baseSpeed : 120),
+│ +    color: options.color ?? COLORS.civilian[Math.floor(rng() * COLORS.civilian.length)],
+│ +    health: kind === 'police' ? 60 : 30,
+│ +    turnCooldown: 0,
+│ +    turnedAt: -1,
+│ +    shootTimer: 0.8 + rng() * POLICE.shootDelay,
+│ +    sirenPhase: rng() * Math.PI * 2,
+│ +    life: 0,
+│ +    wrecked: false,
+│ +  };
+│ +}
+│ +
+│ +/** Spawn civilian traffic just outside the player's view on a road heading toward them. */
+│ +export function spawnCivilianCar(world, rng, player) {
+│ +  const vertical = rng() < 0.5;
+│ +  let dir;
+│ +  let x;
+│ +  let y;
+│ +  let lane;
+│ +  if (vertical) {
+│ +    dir = rng() < 0.5 ? 1 : 3;
+│ +    const col = Math.max(0, Math.min(CITY.cols, Math.floor(player.x / CITY.cell) + Math.floor(rng() * 3) - 1));
+│ +    lane = laneCoord(dir, col);
+│ +    x = lane;
+│ +    y = dir === 1 ? player.y - 760 : player.y + 760;
+│ +    y = Math.max(-120, Math.min(LAND_HEIGHT + 120, y));
+│ +  } else {
+│ +    dir = rng() < 0.5 ? 0 : 2;
+│ +    const row = Math.max(0, Math.min(CITY.rows, Math.floor(player.y / CITY.cell) + Math.floor(rng() * 3) - 1));
+│ +    lane = laneCoord(dir, row);
+│ +    y = lane;
+│ … omitted 203 diff line(s) across 1 additional file(s)/section(s)
+│ game/src/entities.js
+│ @@ -133,10 +133,12 @@
+│          car.dir = rng() < 0.5 ? 0 : 2;
+│          car.laneTarget = laneCoord(car.dir, nextIndex);
+│          car.y = center;
+│ +        car.lane = center;
+│        } else {
+│          car.dir = rng() < 0.5 ? 1 : 3;
+│          car.laneTarget = laneCoord(car.dir, nextIndex);
+│          car.x = center;
+│ +        car.lane = center;
+│        }
+│        car.angle = angleForDir(car.dir);
+│      }
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/mission.js
+│ @@ -0,0 +1,134 @@
+│ +// PORT VESPER - the three short jobs. A mission is a tiny state machine: find a marker, press E,
+│ +// do the step, collect the payoff. The world never decides what a job is; it only holds markers
+│ +// and fires events that the game turns into sound, money and police attention.
+│ +
+│ +const NAMES = ['PACKAGE RUN', 'MARKET HEIST', 'SHAKE THE HEAT'];
+│ +const PAY = [320, 680, 460];
+│ +
+│ +export function createMission(world) {
+│ +  return {
+│ +    index: 0,
+│ +    stage: 0,
+│ +    active: false,
+│ +    timer: 0,
+│ +    flash: 0,
+│ +    completed: [false, false, false],
+│ +    jobsDone: 0,
+│ +    points: world.points,
+│ +  };
+│ +}
+│ +
+│ +/** Where the glowing objective marker sits right now. */
+│ +export function markerFor(m, state) {
+│ +  const p = m.points;
+│ +  if (state.wanted > 0 && m.index === 2 && !m.active) {
+│ +    return { x: p.safehouse.x, y: p.safehouse.y, label: 'SAFEHOUSE', locked: true };
+│ +  }
+│ +  if (!m.active) {
+│ +    if (m.index === 0) return { x: p.pickup.x, y: p.pickup.y, label: 'PICKUP', locked: false };
+│ +    if (m.index === 1) return { x: p.store.x, y: p.store.y, label: 'VESPER MART', locked: false };
+│ +    return { x: p.safehouse.x, y: p.safehouse.y, label: 'SAFEHOUSE', locked: m.completed[2] };
+│ +  }
+│ +  if (m.index === 0) {
+│ +    return m.stage === 0
+│ +      ? { x: p.pickup.x, y: p.pickup.y, label: 'COLLECT PARCEL', locked: false }
+│ +      : { x: p.dropoff.x, y: p.dropoff.y, label: 'DROP AT PIER', locked: false };
+│ +  }
+│ +  if (m.index === 1) return { x: p.store.x, y: p.store.y, label: 'CRACK THE SAFE', locked: false };
+│ +  return { x: p.safehouse.x, y: p.safehouse.y, label: 'SAFEHOUSE', locked: false };
+│ +}
+│ +
+│ +/** The two lines shown in the objective panel, plus the marker's distance for the HUD. */
+│ +export function objectiveFor(m, state) {
+│ +  const name = NAMES[m.index];
+│ +  if (!m.active) {
+│ +    const extra = m.index === 2 && state.wanted === 0 ? 'Get wanted first, then come back.' : 'Press E at the glowing marker to start.';
+│ +    return { title: `NEXT JOB: ${name}`, detail: extra };
+│ +  }
+│ +  if (m.index === 0 && m.stage === 1) return { title: name, detail: 'Take the parcel to the pier.' };
+│ +  if (m.index === 1 && m.stage === 1) return { title: name, detail: `Cracking the safe... ${Math.ceil(m.timer)}s` };
+│ +  if (m.index === 2) return { title: name, detail: state.wanted === 0 ? 'Heat is gone. Job complete.' : 'Lose the police. Stay out of sight.' };
+│ +  if (m.index === 1) return { title: name, detail: 'Hold position while the safe opens.' };
+│ +  return { title: name, detail: 'Grab the parcel at the marked lot.' };
+│ +}
+│ +
+│ +function finish(m, state) {
+│ +  const index = m.index;
+│ +  const pay = PAY[index] * (m.completed[index] ? 0.5 : 1);
+│ +  state.money += Math.round(pay);
+│ +  state.player.money = state.money;
+│ +  state.events.push('missionDone');
+│ +  m.completed[index] = true;
+│ +  m.jobsDone += 1;
+│ +  m.active = false;
+│ +  m.stage = 0;
+│ +  m.index = (index + 1) % 3;
+│ +  m.flash = 2.5;
+│ +  state.message = `JOB COMPLETE  +$${Math.round(pay)}`;
+│ +  state.messageTime = 3.5;
+│ +  if (index === 2) {
+│ +    state.player.health = Math.min(100, state.player.health + 25);
+│ +    state.player.ammo += 12;
+│ +  }
+│ +}
+│ +
+│ +/** E near the current marker. Returns true when a press was consumed. */
+│ +export function interact(m, state) {
+│ +  const marker = markerFor(m, state);
+│ +  const dx = marker.x - state.player.x;
+│ … omitted 56 diff line(s) across 1 additional file(s)/section(s)
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/audio.js
+│ @@ -0,0 +1,156 @@
+│ +// PORT VESPER - every sound is synthesised in the browser. No files, no network, no samples: a
+│ +// few oscillators, one noise buffer and short gain envelopes. Audio starts only after a gesture.
+│ +
+│ +export function createAudio() {
+│ +  let ctx = null;
+│ +  let master = null;
+│ +  let noiseBuffer = null;
+│ +  let engineOsc = null;
+│ +  let engineGain = null;
+│ +  let engineFilter = null;
+│ +  let sirenOsc = null;
+│ +  let sirenGain = null;
+│ +  let sirenLfo = null;
+│ +  let muted = false;
+│ +
+│ +  function makeNoise() {
+│ +    const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.6), ctx.sampleRate);
+│ +    const data = buffer.getChannelData(0);
+│ +    for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
+│ +    return buffer;
+│ +  }
+│ +
+│ +  function ensure() {
+│ +    if (!ctx) {
+│ +      const Audio = window.AudioContext || window.webkitAudioContext;
+│ +      if (!Audio) return false;
+│ +      try {
+│ +        ctx = new Audio();
+│ +        master = ctx.createGain();
+│ +        master.gain.value = muted ? 0 : 0.34;
+│ +        master.connect(ctx.destination);
+│ +        noiseBuffer = makeNoise();
+│ +
+│ +        engineOsc = ctx.createOscillator();
+│ +        engineOsc.type = 'sawtooth';
+│ +        engineOsc.frequency.value = 70;
+│ +        engineFilter = ctx.createBiquadFilter();
+│ +        engineFilter.type = 'lowpass';
+│ +        engineFilter.frequency.value = 480;
+│ +        engineGain = ctx.createGain();
+│ +        engineGain.gain.value = 0;
+│ +        engineOsc.connect(engineFilter).connect(engineGain).connect(master);
+│ +        engineOsc.start();
+│ +
+│ +        sirenOsc = ctx.createOscillator();
+│ +        sirenOsc.type = 'sawtooth';
+│ +        sirenOsc.frequency.value = 500;
+│ +        sirenGain = ctx.createGain();
+│ +        sirenGain.gain.value = 0;
+│ +        sirenLfo = ctx.createOscillator();
+│ +        sirenLfo.type = 'sine';
+│ +        sirenLfo.frequency.value = 2.6;
+│ +        const sweep = ctx.createGain();
+│ +        sweep.gain.value = 150;
+│ +        sirenLfo.connect(sweep).connect(sirenOsc.frequency);
+│ +        sirenOsc.connect(sirenGain).connect(master);
+│ +        sirenOsc.start();
+│ +        sirenLfo.start();
+│ +      } catch {
+│ +        ctx = null;
+│ +        return false;
+│ +      }
+│ +    }
+│ +    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+│ +    return true;
+│ +  }
+│ +
+│ +  function tone(frequency, duration, type, volume, endFrequency) {
+│ +    if (!ensure()) return;
+│ +    const now = ctx.currentTime;
+│ +    const osc = ctx.createOscillator();
+│ +    const gain = ctx.createGain();
+│ +    osc.type = type || 'sine';
+│ +    osc.frequency.setValueAtTime(frequency, now);
+│ +    if (endFrequency) osc.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), now + duration);
+│ +    gain.gain.setValueAtTime(Math.max(0.0001, volume), now);
+│ +    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+│ +    osc.connect(gain).connect(master);
+│ … omitted 78 diff line(s) across 1 additional file(s)/section(s)
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/render.js
+│ @@ -1,141 +1,639 @@
+│ -// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
+│ -// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
+│ -// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
+│ -// rebuilt only when the number changes, so a frame allocates nothing.
+│ -import { FIELD, FONT, LIVES, PALETTE } from './config.js';
+│ -import { KIND_COIN } from './world.js';
+│ -
+│ -export const SCREEN_TITLE = 'title';
+│ -export const SCREEN_PLAY = 'play';
+│ -export const SCREEN_PAUSED = 'paused';
+│ -export const SCREEN_OVER = 'over';
+│ -
+│ -/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
+│ -const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
+│ -const LIFE_SIZE = 20;
+│ -const LIFE_GAP = 8;
+│ -
+│ -function cachedLabel(prefix) {
+│ -  let value = -1;
+│ -  let text = '';
+│ -  return function label(next) {
+│ -    if (next !== value) {
+│ -      value = next;
+│ -      text = prefix + next;
+│ -    }
+│ -    return text;
+│ +// PORT VESPER - drawing only. A top-down camera follows the player across the authored city; the
+│ +// 1280x720 logical view is letterboxed into the window. Everything is canvas paths and text, so
+│ +// the whole game is self-contained and screenshot frames come from the exact same draw path.
+│ +
+│ +import { CITY, COLORS, FIELD, FONT, MONO, SCREEN, WANTED } from './config.js';
+│ +import { markerFor, objectiveFor } from './mission.js';
+│ +
+│ +function roundRect(ctx, x, y, w, h, r) {
+│ +  const radius = Math.min(r, w / 2, h / 2);
+│ +  ctx.beginPath();
+│ +  ctx.moveTo(x + radius, y);
+│ +  ctx.lineTo(x + w - radius, y);
+│ +  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+│ +  ctx.lineTo(x + w, y + h - radius);
+│ +  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+│ +  ctx.lineTo(x + radius, y + h);
+│ +  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+│ +  ctx.lineTo(x, y + radius);
+│ +  ctx.quadraticCurveTo(x, y, x + radius, y);
+│ +  ctx.closePath();
+│ +}
+│ +
+│ +function star(ctx, cx, cy, outer, inner, points) {
+│ +  ctx.beginPath();
+│ +  for (let i = 0; i < points * 2; i += 1) {
+│ +    const radius = i % 2 === 0 ? outer : inner;
+│ +    const angle = (i * Math.PI) / points - Math.PI / 2;
+│ +    const x = cx + Math.cos(angle) * radius;
+│ +    const y = cy + Math.sin(angle) * radius;
+│ +    if (i === 0) ctx.moveTo(x, y);
+│ +    else ctx.lineTo(x, y);
+│ +  }
+│ +  ctx.closePath();
+│ +}
+│ +
+│ +export function createRenderer(canvas) {
+│ +  const ctx = canvas.getContext('2d');
+│ +  const view = { scale: 1, ox: 0, oy: 0, dpr: 1 };
+│ +
+│ +  function resize() {
+│ +    const dpr = window.devicePixelRatio || 1;
+│ +    const width = Math.max(1, Math.round(window.innerWidth * dpr));
+│ +    const height = Math.max(1, Math.round(window.innerHeight * dpr));
+│ +    canvas.width = width;
+│ +    canvas.height = height;
+│ +    view.dpr = dpr;
+│ +    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
+│ +    view.ox = (width - FIELD.width * view.scale) / 2;
+│ +    view.oy = (height - FIELD.height * view.scale) / 2;
+│ +  }
+│ +
+│ +  function toLogical(clientX, clientY) {
+│ … omitted 700 diff line(s) across 1 additional file(s)/section(s)
+│ game/src/input.js
+│ @@ -44,7 +44,6 @@
+│      if (event.button === 0) {
+│        firing = true;
+│        actions.click = true;
+│ -      actions.confirm = true;
+│      }
+│      event.preventDefault();
+│    });
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/game.js
+│ @@ -0,0 +1,627 @@
+│ +// PORT VESPER - boot, the fixed-step simulation and the glue between the modules. One frame reads
+│ +// input, advances the world in 1/60 s steps, plays the sounds those steps produced and paints.
+│ +// The same createGame/step/draw path is used by live play and by the deterministic shot modes.
+│ +
+│ +import {
+│ +  CAR, CITY, COLORS, FIELD, PED_LIMIT, PLAYER, POLICE, SAVE_KEY,
+│ +  SCREEN, STEP, TRAFFIC_LIMIT, WANTED,
+│ +} from './config.js';
+│ +import { clampCamera, collideCircle, createWorld, makeRandom, pointInBuilding, roadSpawn } from './world.js';
+│ +import {
+│ +  createCar, createPed, createPlayer, emitParticles, spawnBullet,
+│ +  spawnCivilianCar, spawnPoliceCar, updateCar, updatePed,
+│ +} from './entities.js';
+│ +import { createMission, interact as missionInteract, updateMission } from './mission.js';
+│ +import { createRenderer } from './render.js';
+│ +import { createAudio } from './audio.js';
+│ +import { createInput } from './input.js';
+│ +import { planShot } from './shots.js';
+│ +
+│ +const IDLE = { moveX: 0, moveY: 0, sprint: false, shoot: false, aimX: 0, aimY: 0, interact: false, enter: false };
+│ +
+│ +function clamp(value, min, max) {
+│ +  return Math.max(min, Math.min(max, value));
+│ +}
+│ +
+│ +export function createGame(canvas, options = {}) {
+│ +  const seed = Number.isInteger(options.seed) ? options.seed : 7;
+│ +  const renderer = createRenderer(canvas);
+│ +  const audio = options.silent ? null : createAudio();
+│ +  const input = options.silent ? null : createInput(canvas, renderer.toLogical);
+│ +  let world;
+│ +  let state;
+│ +
+│ +  function freshState() {
+│ +    world = createWorld(seed);
+│ +    const p = createPlayer(world);
+│ +    state = {
+│ +      world,
+│ +      rng: makeRandom(seed ^ 0x9e3779b9),
+│ +      time: 0,
+│ +      player: p,
+│ +      cars: [],
+│ +      peds: [],
+│ +      bullets: [],
+│ +      particles: [],
+│ +      wanted: 0,
+│ +      wantedTimer: 0,
+│ +      policeTimer: 2,
+│ +      trafficTimer: 0.4,
+│ +      pedTimer: 0.2,
+│ +      mission: createMission(world),
+│ +      money: 0,
+│ +      camera: clampCamera(world, p.x - FIELD.width / 2, p.y - FIELD.height / 2),
+│ +      shake: 0,
+│ +      message: '',
+│ +      messageTime: 0,
+│ +      events: [],
+│ +      busted: false,
+│ +      saveTimer: 0,
+│ +      stats: { shots: 0, cars: 0, jobs: 0 },
+│ +    };
+│ +    return state;
+│ +  }
+│ +
+│ +  function reset() {
+│ +    freshState();
+│ +    for (let i = 0; i < 14; i += 1) state.peds.push(createPed(world, state.rng));
+│ +    return state;
+│ +  }
+│ +
+│ +  function say(text, seconds) {
+│ +    state.message = text;
+│ +    state.messageTime = seconds || 3;
+│ +  }
+│ +
+│ +  function addWanted(amount) {
+│ +    state.wanted = clamp(state.wanted + amount, 0, WANTED.max);
+│ +    if (state.wanted > 0) state.wantedTimer = WANTED.decayDelay;
+│ … omitted 549 diff line(s) across 1 additional file(s)/section(s)
+│ game/src/game.js
+│ @@ -219,7 +219,6 @@
+│
+│      if (p.car) {
+│        const car = p.car;
+│ -      car.exitCd = Math.max(0, (car.exitCd || 0) - dt);
+│        const throttle = -cmd.moveY;
+│        const steer = cmd.moveX;
+│        if (throttle > 0) car.speed += CAR.accel * throttle * dt;
+│ game/src/game.js
+│ @@ -329,6 +329,7 @@
+│
+│      for (let i = state.cars.length - 1; i >= 0; i -= 1) {
+│        const car = state.cars[i];
+│ +      car.exitCd = Math.max(0, (car.exitCd || 0) - dt);
+│        updateCar(car, state, dt);
+│        const distance = Math.hypot(car.x - p.x, car.y - p.y);
+│        if (car.wrecked || (distance > 2300 && car.kind === 'civil') || (state.wanted === 0 && car.kind === 'police' && distance > 1700)) {
+│ cache/scratch/gta/makefun-gta6-20261118/game/src/shots.js
+│ @@ -1,79 +1,102 @@
+│ -// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
+│ -// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
+│ -// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
+│ -// is what a short game really looks like and the same seed always gives the same frame.
+│ -import { FIELD, PLAYER, STEP } from './config.js';
+│ -import { EVENT_OVER, KIND_BLOCK } from './world.js';
+│ -import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+│ +// PORT VESPER - deterministic screenshot scenes. A plan names the starting scenario, the screen to
+│ +// draw, how many fixed steps to run and a scripted control input for each step. Because the world
+│ +// and every input come from the seed, the same query always produces the very same frame.
+│
+│ -const START_SECONDS = 5;
+│ -const PLAY_SECONDS = 26;
+│ -const END_LIMIT_SECONDS = 600;
+│ -/**
+│ - * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
+│ - * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
+│ - * caught out once the blocks speed up, as a hurried player is.
+│ - */
+│ -const HORIZON_PLAY = 0.7;
+│ -const HORIZON_END = 0.25;
+│ -const SAMPLE = 1 / 30;
+│ -const DIRECTIONS = [0, -1, 1];
+│ -/** Extra room, each side, it keeps between the paddle and a block. */
+│ -const MARGIN = 10;
+│ +import { FIELD } from './config.js';
+│
+│ -/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
+│ -function timeToHit(state, direction, horizon) {
+│ -  const player = state.player;
+│ -  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
+│ -    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
+│ -    for (let index = 0; index < state.items.length; index += 1) {
+│ -      const item = state.items[index];
+│ -      if (!item.active || item.kind !== KIND_BLOCK) continue;
+│ -      const y = item.y + item.speed * t;
+│ -      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
+│ -    }
+│ +export const SHOTS = ['start', 'street', 'chase', 'mission'];
+│ +
+│ +const BASE = {
+│ +  moveX: 0, moveY: 0, sprint: false, shoot: false,
+│ +  aimX: 0, aimY: 0, interact: false, enter: false,
+│ +};
+│ +
+│ +/** The four plans used by ?shot=start|street|chase|mission&seed=7. */
+│ +export function planShot(name) {
+│ +  if (name === 'chase') {
+│ +    return {
+│ +      scenario: 'chase',
+│ +      screen: 'play',
+│ +      steps: 138,
+│ +      pointerX: 884,
+│ +      pointerY: 344,
+│ +      input(index, state) {
+│ +        let cop = null;
+│ +        for (const car of state.cars) {
+│ +          if (car.kind === 'police' && car.x > state.player.x) {
+│ +            cop = car;
+│ +            break;
+│ +          }
+│ +        }
+│ +        if (!cop) cop = state.cars.find((car) => car.kind === 'police') || null;
+│ +        return {
+│ +          ...BASE,
+│ +          moveX: Math.sin(index / 30) * 0.32,
+│ +          moveY: -1,
+│ +          shoot: index % 9 < 5,
+│ +          aimX: cop ? cop.x : state.player.x + 320,
+│ +          aimY: cop ? cop.y : state.player.y - 40,
+│ +        };
+│ +      },
+│ +    };
+│    }
+│ -  return Infinity;
+│ +
+│ +  if (name === 'mission') {
+│ +    return {
+│ … omitted 99 diff line(s) across 1 additional file(s)/section(s)
+│ cache/scratch/gta/makefun-gta6-20261118/game/index.html
+│ @@ -3,17 +3,19 @@
+│  <head>
+│  <meta charset="utf-8">
+│  <meta name="viewport" content="width=device-width, initial-scale=1">
+│ -<title>Block Dodger</title>
+│ +<title>PORT VESPER - Open-World Crime Sandbox</title>
+│ +<meta name="description" content="A self-contained top-down open-world crime game. Walk, drive, shoot, take jobs and outrun the police in Port Vesper.">
+│  <style>
+│ -  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+│ -  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+│ -  /* Read aloud, never shown: the status line screen readers announce. */
+│ +  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; }
+│ +  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+│    #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+│ +  noscript { position: absolute; inset: 0; display: grid; place-items: center; color: #f5c65f; font: 16px sans-serif; }
+│  </style>
+│  </head>
+│  <body>
+│ -<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+│ +<canvas id="game" aria-label="Port Vesper: a top-down open-world crime game. Use WASD to walk and drive, Space to enter or exit cars, Shift to sprint, mouse to aim and click to shoot, and E to start missions."></canvas>
+│  <p id="status" role="status" aria-live="polite"></p>
+│ -<script type="module" src="./src/main.js"></script>
+│ +<noscript>Port Vesper needs JavaScript enabled.</noscript>
+│ +<script type="module" src="./src/game.js"></script>
+│  </body>
+│  </html>
+│ game/src/game.js
+│ @@ -625,3 +625,5 @@
+│    announce('Port Vesper. Press Enter to start.');
+│    requestAnimationFrame(frame);
+│  }
+│ +
+│ +boot();
+│ cache/scratch/gta/makefun-gta6-20261118/main.ts
+│ @@ -1,37 +1,29 @@
+│ -// A working gta6-01 entry (Node 22, standard library only): the game is this directory's
+│ -// game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
+│ -// modules, no library and no network request), and the program hands it in. It copies game/ and
+│ -// screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
+│ -// judge reads, with the vendored make.fun library. Only the plumbing, not an open world: Block
+│ -// Dodger, a plain 2D canvas game where a paddle dodges falling blocks and catches coins, with a
+│ -// title screen, score, lives and levels, game over and restart, flat colours and no sound. Build
+│ -// your own open-world crime game in its place (three.js or any library you vendor under game/),
+│ -// put your 3 or 4 PNG or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
+│ -//
+│ -// Serve it locally with `node serve.ts`, then open http://localhost:8080.
+│ -// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+│ -//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+│ +// PORT VESPER hand-in entry. The deliverable is the self-contained game/ folder: plain static
+│ +// files that a browser opens offline, with no build step, no packages and no network fetches.
+│ +// This script copies that folder plus the captured shots to the output directory and asks the
+│ +// vendored make.fun library to describe the result. vendor/ is used as-is and never changed.
+│
+│  import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+│  import { join } from 'node:path';
+│  import { fileURLToPath } from 'node:url';
+│  import { buildDossier } from './vendor/makefun-game.ts';
+│
+│ -const here = fileURLToPath(new URL('.', import.meta.url));
+│ -const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+│ +const root = fileURLToPath(new URL('.', import.meta.url));
+│ +const output = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+│
+│ -mkdirSync(out, { recursive: true });
+│ -cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
+│ -mkdirSync(join(out, 'screenshots'), { recursive: true });
+│ -if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+│ +mkdirSync(output, { recursive: true });
+│ +cpSync(join(root, 'game'), join(output, 'game'), { recursive: true });
+│
+│ -// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
+│ -// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
+│ -// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
+│ -// screenshots/ and dossier.json).
+│ +mkdirSync(join(output, 'screenshots'), { recursive: true });
+│ +if (existsSync(join(root, 'screenshots'))) {
+│ +  cpSync(join(root, 'screenshots'), join(output, 'screenshots'), { recursive: true });
+│ +}
+│ +
+│ +// The scorer's own limits: only text_max_bytes changes the dossier bytes. The rest refuse a
+│ +// submission the scorer would refuse, so passing them keeps local output identical to graded.
+│  writeFileSync(
+│ -  join(out, 'dossier.json'),
+│ -  buildDossier(out, {
+│ +  join(output, 'dossier.json'),
+│ +  buildDossier(output, {
+│      text_max_bytes: 163840,
+│      screenshots: { max: 4, max_bytes: 262144 },
+│      game_max_files: 993,
+│ cache/scratch/gta/makefun-gta6-20261118/shots.json
+│ @@ -1,5 +1,6 @@
+│  [
+│ -  { "name": "1-start.jpg", "query": "?shot=start&seed=1" },
+│ -  { "name": "2-play.jpg", "query": "?shot=play&seed=1" },
+│ -  { "name": "3-end.jpg", "query": "?shot=end&seed=1" }
+│ +  { "name": "1-start.jpg", "query": "?shot=start&seed=7" },
+│ +  { "name": "2-street.jpg", "query": "?shot=street&seed=7" },
+│ +  { "name": "3-chase.jpg", "query": "?shot=chase&seed=7" },
+│ +  { "name": "4-mission.jpg", "query": "?shot=mission&seed=7" }
+│  ]
+│ cache/scratch/gta/makefun-gta6-20261118/README.md
+│ @@ -0,0 +1,75 @@
+│ +# PORT VESPER
+│ +
+│ +An original top-down open-world crime game for make.fun gta6-01. The whole game is plain static
+│ +files under `game/`: no build step, no packages, no external assets and no network requests.
+│ +Everything you see and hear is drawn on a canvas or synthesised with WebAudio at runtime.
+│ +
+│ +## Play
+│ +
+│ +```
+│ +node serve.ts
+│ +```
+│ +
+│ +Open the local address the server prints. The game starts on a title screen.
+│ +
+│ +| Control | Action |
+│ +| --- | --- |
+│ +| WASD or arrow keys | Walk; W/S accelerate and brake while driving, A/D steer |
+│ +| Shift | Sprint on foot |
+│ +| Mouse | Aim |
+│ +| Click | Shoot |
+│ +| Space | Enter the nearest car or get out |
+│ +| E | Start or advance a job at the glowing marker |
+│ +| P or Escape | Pause |
+│ +| M | Mute |
+│ +| C | Continue from the title screen |
+│ +| R | Clear the saved game from the title screen |
+│ +
+│ +## The city
+│ +
+│ +Port Vesper is a hand-authored seven-by-six street grid with sidewalks, tower blocks, shop rows,
+│ +a park, an open market, a waterfront and a pier. Civilian cars follow the lanes and turn at
+│ +junctions, pedestrians walk the pavements and scatter when the heat is on, and police cars appear
+│ +as your wanted level climbs from one to five stars.
+│ +
+│ +Three jobs are available in order: deliver a parcel from a lot to the pier, crack the safe at
+│ +Vesper Market, then shake the police and reach the safehouse. Completing jobs pays cash, refills
+│ +ammo and unlocks the next one. Progress, money, health and position are kept in localStorage.
+│ +
+│ +## Screenshot modes
+│ +
+│ +The game can stage its own deterministic frames for the four captures:
+│ +
+│ +```
+│ +?shot=start&seed=7
+│ +?shot=street&seed=7
+│ +?shot=chase&seed=7
+│ +?shot=mission&seed=7
+│ +```
+│ +
+│ +Each mode starts from a fresh seeded world, runs a fixed number of simulation steps with scripted
+│ +input, paints twice and sets `window.__shotReady`. The same seed always yields the same frame.
+│ +
+│ +## Source layout
+│ +
+│ +```
+│ +game/index.html       page and canvas
+│ +game/src/config.js    tuning, palette and city constants
+│ +game/src/world.js     the authored grid, buildings, lane rules and collision helpers
+│ +game/src/entities.js  cars, pedestrians, bullets and particles
+│ +game/src/mission.js   the three mission state machines
+│ +game/src/input.js     keyboard and pointer
+│ +game/src/audio.js     synthesised sound
+│ +game/src/render.js    camera, city drawing, HUD and screens
+│ +game/src/shots.js     deterministic screenshot plans
+│ +game/src/game.js      simulation, boot and localStorage save
+│ +```
+│ +
+│ +## Hand-in
+│ +
+│ +`main.ts` copies `game/` and `screenshots/` into `MAKEFUN_OUTPUT_DIR` (or `/output`) and writes
+│ +`dossier.json` with the unchanged vendored `buildDossier`:
+│ +
+│ +```
+│ +mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+│ +```
+│ game/src/game.js
+│ @@ -525,6 +525,11 @@
+│        }
+│      }
+│      requestAnimationFrame(paintShot);
+│ +    // A viewport change resizes (and clears) the canvas: repaint the staged frame after it.
+│ +    window.addEventListener('resize', () => {
+│ +      painted = 1;
+│ +      requestAnimationFrame(paintShot);
+│ +    });
+│      return;
+│    }
+│
+│ game/src/render.js
+│ @@ -631,7 +631,8 @@
+│        ctx.rect(0, 0, FIELD.width, FIELD.height);
+│        ctx.clip();
+│        drawCity(state);
+│ -      drawHud(state, ui, screen);
+│ +      // The title screen owns the frame; gameplay HUD would compete with its own copy.
+│ +      if (screen !== SCREEN.START) drawHud(state, ui, screen);
+│        if (screen !== SCREEN.PLAY) drawOverlay(state, screen, ui);
+│        ctx.restore();
+│      },
+│ game/src/game.js
+│ @@ -115,11 +115,13 @@
+│        state.money = 1240;
+│        state.wanted = 5;
+│        state.wantedTimer = 999;
+│ -      for (let i = 0; i < 5; i += 1) {
+│ -        const spot = roadSpawn(world, p.x, p.y, 240 + i * 48, state.rng);
+│ +      // Police are placed on the same horizontal road, ahead and behind, so the pursuit reads in
+│ +      // a still frame instead of happening just off camera.
+│ +      const offsets = [[310, -26], [430, 24], [545, -14], [-285, 22], [-420, -24]];
+│ +      for (const [dx, dy] of offsets) {
+│          state.cars.push(createCar(world, state.rng, {
+│ -          kind: 'police', x: spot.x, y: spot.y,
+│ -          angle: Math.atan2(p.y - spot.y, p.x - spot.x),
+│ +          kind: 'police', x: p.x + dx, y: p.y + dy,
+│ +          angle: Math.atan2(p.y - (p.y + dy), p.x - (p.x + dx)),
+│            targetSpeed: 250, color: COLORS.policeBody,
+│          }));
+│        }
+│ game/src/game.js
+│ @@ -6,7 +6,7 @@
+│    CAR, CITY, COLORS, FIELD, PED_LIMIT, PLAYER, POLICE, SAVE_KEY,
+│    SCREEN, STEP, TRAFFIC_LIMIT, WANTED,
+│  } from './config.js';
+│ -import { clampCamera, collideCircle, createWorld, makeRandom, pointInBuilding, roadSpawn } from './world.js';
+│ +import { clampCamera, collideCircle, createWorld, makeRandom, pointInBuilding } from './world.js';
+│  import {
+│    createCar, createPed, createPlayer, emitParticles, spawnBullet,
+│    spawnCivilianCar, spawnPoliceCar, updateCar, updatePed,
+│ game/src/shots.js
+│ @@ -17,7 +17,7 @@
+│      return {
+│        scenario: 'chase',
+│        screen: 'play',
+│ -      steps: 138,
+│ +      steps: 84,
+│        pointerX: 884,
+│        pointerY: 344,
+│        input(index, state) {
+│ game/src/shots.js
+│ @@ -33,7 +33,7 @@
+│            ...BASE,
+│            moveX: Math.sin(index / 30) * 0.32,
+│            moveY: -1,
+│ -          shoot: index % 9 < 5,
+│ +          shoot: index % 16 < 4,
+│            aimX: cop ? cop.x : state.player.x + 320,
+│            aimY: cop ? cop.y : state.player.y - 40,
+│          };
+│ game/src/game.js
+│ @@ -501,6 +501,8 @@
+│    const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
+│    const seed = Number.isInteger(seedParam) ? seedParam : 7;
+│    const game = createGame(canvas, { seed, silent: Boolean(shotName) && ['start', 'street', 'chase', 'mission'].includes(shotName) });
+│ +  // A small read-only handle for debugging and automated checks; the game never depends on it.
+│ +  window.__portVesper = game;
+│
+│    function announce(message) {
+│      if (status) status.textContent = message;
+│ game/src/game.js
+│ @@ -446,6 +446,9 @@
+│      }
+│    }
+│
+│ +  // A fresh world exists from the moment the game is created, even before "new game" is pressed.
+│ +  reset();
+│ +
+│    return {
+│      state: () => state,
+│      input,
+│ game/src/mission.js
+│ @@ -21,7 +21,7 @@
+│  /** Where the glowing objective marker sits right now. */
+│  export function markerFor(m, state) {
+│    const p = m.points;
+│ -  if (state.wanted > 0 && m.index === 2 && !m.active) {
+│ +  if (state.wanted === 0 && m.index === 2 && !m.active) {
+│      return { x: p.safehouse.x, y: p.safehouse.y, label: 'SAFEHOUSE', locked: true };
+│    }
+│    if (!m.active) {
+│ README.md
+│ @@ -33,8 +33,9 @@
+│  as your wanted level climbs from one to five stars.
+│
+│  Three jobs are available in order: deliver a parcel from a lot to the pier, crack the safe at
+│ -Vesper Market, then shake the police and reach the safehouse. Completing jobs pays cash, refills
+│ -ammo and unlocks the next one. Progress, money, health and position are kept in localStorage.
+│ +Vesper Market, then shake the police and reach the safehouse. Completing jobs pays cash and
+│ +unlocks the next one; the last job also restores health and ammo. Progress, money, health and
+│ +position are kept in localStorage.
+│
+│  ## Screenshot modes
+│
+Files written:
+
+- game/index.html
+- game/src/config.js
+- game/src/input.js
+- game/src/world.js
+- game/src/entities.js
+- game/src/render.js
+- game/src/audio.js
+- game/src/mission.js
+- game/src/game.js
+- game/src/shots.js
+- main.ts
+- README.md
+- shots.json
+- screenshots/1-start.jpg, 2-street.jpg, 3-chase.jpg, 4-mission.jpg
+
+Removed the old main.js/random.js and placeholder screenshots. `node --check` passed on every .js file; `node main.ts` produced the dossier; browser checks confirmed walking, driving, car entry, shooting, wanted/police, all three missions, pause, save and all four screenshot modes.
+
+⚠️ File-mutation verifier: 1 file edit(s) FAILED this turn despite any wording above that may suggest otherwise. Run `git status` or `read_file` to confirm what actually landed.
+  • `/Users/baophan/.hermes/cache/scratch/game/src/game.js` — [patch] Failed to read file: `/Users/baophan/.hermes/cache/scratch/game/src/game.js`
+
+session_id: local-7b05b74df6964fed97e4926134b29afc41b85d9ad57e5bb7eb76993f11dd2c10

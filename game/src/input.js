@@ -1,52 +1,77 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// PORT VESPER - keyboard and mouse. Held keys are read every frame; one-shot presses are queued as
+// small action flags so a tap between two frames is never dropped or counted twice.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+const KEY_CODES = new Set([
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'Space', 'ShiftLeft', 'ShiftRight', 'KeyE', 'KeyM', 'KeyP', 'Escape', 'Enter', 'KeyC', 'KeyR',
+]);
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+export function createInput(canvas, toLogical) {
+  const keys = new Set();
+  const actions = { confirm: false, interact: false, mute: false, pause: false, continue: false, restart: false, click: false };
+  let pointer = { x: 640, y: 360 };
+  let firing = false;
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+  function movePointer(event) {
+    pointer = toLogical(event.clientX, event.clientY);
+  }
 
   window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
+    if (!KEY_CODES.has(event.code)) return;
     event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+    keys.add(event.code);
+    if (event.repeat) return;
+    if (event.code === 'Space' || event.code === 'Enter') actions.confirm = true;
+    else if (event.code === 'KeyE') actions.interact = true;
+    else if (event.code === 'KeyM') actions.mute = true;
+    else if (event.code === 'KeyP' || event.code === 'Escape') actions.pause = true;
+    else if (event.code === 'KeyC') actions.continue = true;
+    else if (event.code === 'KeyR') actions.restart = true;
   });
 
+  window.addEventListener('keyup', (event) => {
+    keys.delete(event.code);
+  });
+
+  window.addEventListener('blur', () => {
+    keys.clear();
+    firing = false;
+  });
+
+  canvas.addEventListener('pointermove', movePointer);
+  canvas.addEventListener('pointerdown', (event) => {
+    movePointer(event);
+    if (event.button === 0) {
+      firing = true;
+      actions.click = true;
+    }
+    event.preventDefault();
+  });
+  window.addEventListener('pointerup', () => { firing = false; });
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
+    /** The current control state, with the mouse translated into world coordinates. */
+    snapshot(camera) {
+      const left = keys.has('KeyA') || keys.has('ArrowLeft');
+      const right = keys.has('KeyD') || keys.has('ArrowRight');
+      const up = keys.has('KeyW') || keys.has('ArrowUp');
+      const down = keys.has('KeyS') || keys.has('ArrowDown');
+      return {
+        moveX: (right ? 1 : 0) - (left ? 1 : 0),
+        moveY: (down ? 1 : 0) - (up ? 1 : 0),
+        sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'),
+        shoot: firing,
+        aimX: camera.x + pointer.x,
+        aimY: camera.y + pointer.y,
+        pointerX: pointer.x,
+        pointerY: pointer.y,
+      };
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
+    /** Staged presses since the previous call; calling clears them. */
     takeActions() {
-      const taken = actions;
-      actions = 0;
+      const taken = { ...actions };
+      for (const key of Object.keys(actions)) actions[key] = false;
       return taken;
     },
   };

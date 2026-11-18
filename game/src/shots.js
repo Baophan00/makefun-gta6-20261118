@@ -1,79 +1,102 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// PORT VESPER - deterministic screenshot scenes. A plan names the starting scenario, the screen to
+// draw, how many fixed steps to run and a scripted control input for each step. Because the world
+// and every input come from the seed, the same query always produces the very same frame.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { FIELD } from './config.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
-}
+export const SHOTS = ['start', 'street', 'chase', 'mission'];
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
-}
+const BASE = {
+  moveX: 0, moveY: 0, sprint: false, shoot: false,
+  aimX: 0, aimY: 0, interact: false, enter: false,
+};
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+/** The four plans used by ?shot=start|street|chase|mission&seed=7. */
+export function planShot(name) {
+  if (name === 'chase') {
+    return {
+      scenario: 'chase',
+      screen: 'play',
+      steps: 84,
+      pointerX: 884,
+      pointerY: 344,
+      input(index, state) {
+        let cop = null;
+        for (const car of state.cars) {
+          if (car.kind === 'police' && car.x > state.player.x) {
+            cop = car;
+            break;
+          }
+        }
+        if (!cop) cop = state.cars.find((car) => car.kind === 'police') || null;
+        return {
+          ...BASE,
+          moveX: Math.sin(index / 30) * 0.32,
+          moveY: -1,
+          shoot: index % 16 < 4,
+          aimX: cop ? cop.x : state.player.x + 320,
+          aimY: cop ? cop.y : state.player.y - 40,
+        };
+      },
+    };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+
+  if (name === 'mission') {
+    return {
+      scenario: 'mission',
+      screen: 'play',
+      steps: 54,
+      pointerX: 760,
+      pointerY: 380,
+      input(index, state) {
+        return {
+          ...BASE,
+          moveX: index < 18 ? -0.35 : 0,
+          moveY: index < 18 ? -0.2 : 0,
+          sprint: false,
+          shoot: false,
+          aimX: state.world.points.store.x,
+          aimY: state.world.points.store.y,
+        };
+      },
+    };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+
+  if (name === 'street') {
+    return {
+      scenario: 'street',
+      screen: 'play',
+      steps: 108,
+      pointerX: 810,
+      pointerY: 300,
+      input(index, state) {
+        return {
+          ...BASE,
+          moveX: 0.35 + Math.sin(index / 46) * 0.22,
+          moveY: -0.62,
+          sprint: index > 55,
+          shoot: false,
+          aimX: state.player.x + 280,
+          aimY: state.player.y - 140,
+        };
+      },
+    };
+  }
+
+  return {
+    scenario: 'start',
+    screen: 'start',
+    steps: 66,
+    pointerX: FIELD.width / 2,
+    pointerY: FIELD.height / 2,
+    input(index, state) {
+      return {
+        ...BASE,
+        moveX: index < 34 ? 0.5 : 0,
+        moveY: -0.35,
+        aimX: state.player.x + 200,
+        aimY: state.player.y - 60,
+      };
+    },
+  };
 }
